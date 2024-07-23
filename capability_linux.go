@@ -27,19 +27,33 @@ var (
 	capLastCap Cap
 )
 
-func init() {
+func getCapMaskCapLast() (uint32, Cap, error) {
+	// capLastCap is already set
+	if capLastCap != 0 {
+		return capUpperMask, capLastCap, nil
+	}
 	var hdr capHeader
 	_ = capget(&hdr, nil)
 	capVers = hdr.version
-
-	if initLastCap() == nil {
-		CAP_LAST_CAP = capLastCap
-		if capLastCap > 31 {
-			capUpperMask = (uint32(1) << (uint(capLastCap) - 31)) - 1
-		} else {
-			capUpperMask = 0
-		}
+	if err := initLastCap(); err != nil {
+		return 0, 0, err
 	}
+	if capLastCap > 31 {
+		capUpperMask = (uint32(1) << (uint(capLastCap) - 31)) - 1
+	} else {
+		capUpperMask = 0
+	}
+	return capUpperMask, capLastCap, nil
+}
+
+// Highest valid capability of the running kernel.
+// Notice: we can't use CAP_LAST_CAP anymore use GetCapLastCap() instead.
+func GetCapLastCap() (Cap, error) {
+	_, capLastCap, err := getCapMaskCapLast()
+	if err != nil {
+		return 0, err
+	}
+	return capLastCap, nil
 }
 
 func initLastCap() error {
@@ -65,7 +79,8 @@ func initLastCap() error {
 }
 
 func mkStringCap(c Capabilities, which CapType) (ret string) {
-	for i, first := Cap(0), true; i <= CAP_LAST_CAP; i++ {
+	_, capLastCap, _ := getCapMaskCapLast()
+	for i, first := Cap(0), true; i <= capLastCap; i++ {
 		if !c.Get(which, i) {
 			continue
 		}
@@ -97,6 +112,11 @@ func mkString(c Capabilities, max CapType) (ret string) {
 }
 
 func newPid(pid int) (c Capabilities, err error) {
+	//make sure func getCapMaskCapLast() run ok and can get right value
+	_, _, err = getCapMaskCapLast()
+	if err != nil {
+		return nil, err
+	}
 	switch capVers {
 	case 0:
 		err = errors.New("unable to get capability version from the kernel")
@@ -324,8 +344,9 @@ func (c *capsV3) Apply(kind CapType) (err error) {
 		if err != nil {
 			return
 		}
+		_, capLastCap, _ := getCapMaskCapLast()
 		if (1<<uint(CAP_SETPCAP))&data[0].effective != 0 {
-			for i := Cap(0); i <= CAP_LAST_CAP; i++ {
+			for i := Cap(0); i <= capLastCap; i++ {
 				if c.Get(BOUNDING, i) {
 					continue
 				}
@@ -350,7 +371,8 @@ func (c *capsV3) Apply(kind CapType) (err error) {
 	}
 
 	if kind&AMBS == AMBS {
-		for i := Cap(0); i <= CAP_LAST_CAP; i++ {
+		_, capLastCap, _ := getCapMaskCapLast()
+		for i := Cap(0); i <= capLastCap; i++ {
 			action := pr_CAP_AMBIENT_LOWER
 			if c.Get(AMBIENT, i) {
 				action = pr_CAP_AMBIENT_RAISE

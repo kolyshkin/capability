@@ -302,8 +302,5 @@ const (
 )
 
 var (
-	// Highest valid capability of the running kernel.
-	CAP_LAST_CAP = Cap(63)
-
 	capUpperMask = ^uint32(0)
 )
