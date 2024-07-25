@@ -300,7 +300,3 @@ const (
 	// Introduced in kernel 5.9
 	CAP_CHECKPOINT_RESTORE = Cap(40)
 )
-
-var (
-	capUpperMask = ^uint32(0)
-)
