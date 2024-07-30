@@ -12,7 +12,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 )
 
@@ -22,50 +24,42 @@ const (
 	linuxCapVer3 = 0x20080522
 )
 
-var (
-	capVers    uint32
-	capLastCap Cap
-)
-
-func init() {
-	var hdr capHeader
-	_ = capget(&hdr, nil)
-	capVers = hdr.version
-
-	if initLastCap() == nil {
-		CAP_LAST_CAP = capLastCap
-		if capLastCap > 31 {
-			capUpperMask = (uint32(1) << (uint(capLastCap) - 31)) - 1
-		} else {
-			capUpperMask = 0
-		}
-	}
-}
-
-func initLastCap() error {
-	if capLastCap != 0 {
-		return nil
-	}
-
+// LastCap returns highest valid capability of the running kernel.
+var LastCap = sync.OnceValues(func() (Cap, error) {
 	f, err := os.Open("/proc/sys/kernel/cap_last_cap")
 	if err != nil {
-		return err
+		return 0, err
 	}
-	defer f.Close()
 
-	var b []byte = make([]byte, 11)
-	_, err = f.Read(b)
+	buf := make([]byte, 11)
+	l, err := f.Read(buf)
+	f.Close()
 	if err != nil {
-		return err
+		return 0, err
 	}
+	buf = buf[:l]
 
-	fmt.Sscanf(string(b), "%d", &capLastCap)
+	last, err := strconv.Atoi(strings.TrimSpace(string(buf)))
+	if err != nil {
+		return 0, err
+	}
+	return Cap(last), nil
+})
 
-	return nil
+func capUpperMask() uint32 {
+	last, err := LastCap()
+	if err != nil || last < 32 {
+		return 0
+	}
+	return (uint32(1) << (uint(last) - 31)) - 1
 }
 
 func mkStringCap(c Capabilities, which CapType) (ret string) {
-	for i, first := Cap(0), true; i <= CAP_LAST_CAP; i++ {
+	last, err := LastCap()
+	if err != nil {
+		return ""
+	}
+	for i, first := Cap(0), true; i <= last; i++ {
 		if !c.Get(which, i) {
 			continue
 		}
@@ -96,18 +90,27 @@ func mkString(c Capabilities, max CapType) (ret string) {
 	return
 }
 
-func newPid(pid int) (c Capabilities, err error) {
-	switch capVers {
-	case 0:
-		err = errors.New("unable to get capability version from the kernel")
+var capVersion = sync.OnceValues(func() (uint32, error) {
+	var hdr capHeader
+	err := capget(&hdr, nil)
+	return hdr.version, err
+})
+
+func newPid(pid int) (c Capabilities, retErr error) {
+	ver, err := capVersion()
+	if err != nil {
+		retErr = fmt.Errorf("unable to get capability version from the kernel: %w", err)
+		return
+	}
+	switch ver {
 	case linuxCapVer1, linuxCapVer2:
-		err = errors.New("old/unsupported capability version (kernel older than 2.6.26?)")
+		retErr = errors.New("old/unsupported capability version (kernel older than 2.6.26?)")
 	default:
 		// Either linuxCapVer3, or an unknown/future version such as v4.
 		// In the latter case, we fall back to v3 hoping the kernel is
 		// backward-compatible to v3.
 		p := new(capsV3)
-		p.hdr.version = capVers
+		p.hdr.version = ver
 		p.hdr.pid = int32(pid)
 		c = p
 	}
@@ -176,7 +179,8 @@ func (c *capsV3) Full(which CapType) bool {
 	if (data[0] & 0xffffffff) != 0xffffffff {
 		return false
 	}
-	return (data[1] & capUpperMask) == capUpperMask
+	mask := capUpperMask()
+	return (data[1] & mask) == mask
 }
 
 func (c *capsV3) Set(which CapType, caps ...Cap) {
@@ -324,6 +328,10 @@ func (c *capsV3) Load() (err error) {
 }
 
 func (c *capsV3) Apply(kind CapType) (err error) {
+	last, err := LastCap()
+	if err != nil {
+		return err
+	}
 	if kind&BOUNDS == BOUNDS {
 		var data [2]capData
 		err = capget(&c.hdr, &data[0])
@@ -331,7 +339,7 @@ func (c *capsV3) Apply(kind CapType) (err error) {
 			return
 		}
 		if (1<<uint(CAP_SETPCAP))&data[0].effective != 0 {
-			for i := Cap(0); i <= CAP_LAST_CAP; i++ {
+			for i := Cap(0); i <= last; i++ {
 				if c.Get(BOUNDING, i) {
 					continue
 				}
@@ -356,7 +364,7 @@ func (c *capsV3) Apply(kind CapType) (err error) {
 	}
 
 	if kind&AMBS == AMBS {
-		for i := Cap(0); i <= CAP_LAST_CAP; i++ {
+		for i := Cap(0); i <= last; i++ {
 			action := pr_CAP_AMBIENT_LOWER
 			if c.Get(AMBIENT, i) {
 				action = pr_CAP_AMBIENT_RAISE
@@ -437,7 +445,8 @@ func (c *capsFile) Full(which CapType) bool {
 	if (data[0] & 0xffffffff) != 0xffffffff {
 		return false
 	}
-	return (data[1] & capUpperMask) == capUpperMask
+	mask := capUpperMask()
+	return (data[1] & mask) == mask
 }
 
 func (c *capsFile) Set(which CapType, caps ...Cap) {
